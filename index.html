@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>InvoiceExtract — Client-side PDF Invoice & Receipt Extractor</title>
+<style>
+  :root {
+    --bg: #0F0F0F;
+    --card: #1A1A1A;
+    --text: #F5F0E6;
+    --muted: #A8A29E;
+    --accent: #22C55E;
+    --border: #2A2A2A;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 2rem 1rem;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; }
+  header { text-align: center; margin-bottom: 2rem; }
+  h1 { font-size: 2.4rem; font-weight: 600; letter-spacing: -0.03em; }
+  .sub { color: var(--muted); margin-top: 0.5rem; }
+  .drop, .panel {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+  }
+  .drop {
+    border: 2px dashed var(--border);
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
+  .drop:hover, .drop.dragover { border-color: var(--accent); }
+  textarea {
+    width: 100%;
+    min-height: 120px;
+    background: #111;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 0.8rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.85rem;
+    resize: vertical;
+  }
+  button {
+    background: var(--accent);
+    color: #000;
+    border: none;
+    padding: 0.7rem 1.2rem;
+    border-radius: 10px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-right: 0.5rem;
+    margin-top: 0.5rem;
+  }
+  button.secondary { background: #333; color: var(--text); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 1rem;
+    font-size: 0.9rem;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 0.5rem;
+    text-align: left;
+  }
+  th { background: #111; color: var(--muted); }
+  td input {
+    width: 100%;
+    background: transparent;
+    border: none;
+    color: var(--text);
+    font-size: 0.9rem;
+  }
+  #status { margin-top: 1rem; color: var(--muted); font-size: 0.9rem; }
+  footer { text-align: center; color: var(--muted); font-size: 0.8rem; margin-top: 2rem; }
+  .hint { font-size: 0.8rem; color: var(--muted); margin-top: 0.5rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>InvoiceExtract</h1>
+    <p class="sub">Drop PDF invoices or receipts. Extract vendor, date, total, invoice # — entirely in your browser. No uploads.</p>
+  </header>
+
+  <div class="drop" id="drop">
+    <p>Drop PDF files here or click to select</p>
+    <input type="file" id="files" accept="application/pdf" multiple hidden>
+    <p class="hint">Supports multiple files · Text-based PDFs work best</p>
+  </div>
+
+  <div class="panel">
+    <p>Or paste invoice / receipt text:</p>
+    <textarea id="paste" placeholder="Paste text extracted from a PDF or email invoice..."></textarea>
+    <button id="extractPaste">Extract from text</button>
+  </div>
+
+  <div class="panel" id="results" style="display:none">
+    <h3>Extracted data</h3>
+    <div style="overflow-x:auto">
+      <table id="table">
+        <thead>
+          <tr>
+            <th>File / Source</th>
+            <th>Vendor</th>
+            <th>Invoice #</th>
+            <th>Date</th>
+            <th>Total</th>
+            <th>Currency</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+    <div style="margin-top:1rem">
+      <button id="download">Download CSV</button>
+      <button id="copy" class="secondary">Copy CSV</button>
+      <button id="clear" class="secondary">Clear</button>
+    </div>
+  </div>
+
+  <div id="status"></div>
+
+  <footer>Client-side only · Nothing leaves your browser · MIT License</footer>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+const drop = document.getElementById('drop');
+const filesInput = document.getElementById('files');
+const pasteArea = document.getElementById('paste');
+const extractPasteBtn = document.getElementById('extractPaste');
+const results = document.getElementById('results');
+const tbody = document.getElementById('tbody');
+const status = document.getElementById('status');
+const downloadBtn = document.getElementById('download');
+const copyBtn = document.getElementById('copy');
+const clearBtn = document.getElementById('clear');
+
+let rows = [];
+
+drop.addEventListener('click', () => filesInput.click());
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('dragover'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('dragover'));
+drop.addEventListener('drop', e => {
+  e.preventDefault();
+  drop.classList.remove('dragover');
+  handleFiles(e.dataTransfer.files);
+});
+filesInput.addEventListener('change', () => handleFiles(filesInput.files));
+
+extractPasteBtn.addEventListener('click', () => {
+  const text = pasteArea.value.trim();
+  if (!text) return;
+  const extracted = extractFromText(text, 'Pasted text');
+  addRow(extracted);
+});
+
+async function handleFiles(fileList) {
+  status.textContent = 'Processing...';
+  for (const file of fileList) {
+    if (file.type !== 'application/pdf') continue;
+    try {
+      const text = await extractTextFromPDF(file);
+      const extracted = extractFromText(text, file.name);
+      addRow(extracted);
+    } catch (err) {
+      status.textContent = 'Error reading ' + file.name + ': ' + err.message;
+    }
+  }
+  status.textContent = rows.length ? 'Done. Review and edit cells if needed.' : 'No text extracted.';
+}
+
+async function extractTextFromPDF(file) {
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  let fullText = '';
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    const strings = content.items.map(item => item.str);
+    fullText += strings.join(' ') + '\n';
+  }
+  return fullText;
+}
+
+function extractFromText(text, source) {
+  const lines = text.split(/\n|\r/).map(l => l.trim()).filter(Boolean);
+  const lower = text.toLowerCase();
+
+  // Invoice number
+  let invoice = '';
+  const invMatch = text.match(/(?:invoice|inv|receipt|order)\s*(?:#|no\.?|number)?\s*[:#]?\s*([A-Z0-9\-]+)/i);
+  if (invMatch) invoice = invMatch[1];
+
+  // Date
+  let date = '';
+  const dateMatch = text.match(/(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})|((?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2},?\s+\d{4})/i);
+  if (dateMatch) date = dateMatch[0];
+
+  // Total amount
+  let total = '';
+  let currency = '';
+  const totalPatterns = [
+    /(?:total|amount due|balance due|grand total|pay this amount)\s*[:\s]*([\$\u20ac\u00a3\u00a5]?\s*[\d,]+\.?\d*)/i,
+    /([\$\u20ac\u00a3\u00a5]\s*[\d,]+\.\d{2})/g
+  ];
+  for (const pat of totalPatterns) {
+    const m = text.match(pat);
+    if (m) {
+      total = (m[1] || m[0]).replace(/[^\d.,]/g, '');
+      const curr = (m[1] || m[0]).match(/[\$\u20ac\u00a3\u00a5]/);
+      if (curr) currency = curr[0];
+      break;
+    }
+  }
+  if (!currency && /usd|eur|gbp|nok|sek/i.test(text)) {
+    if (/usd/i.test(text)) currency = 'USD';
+    else if (/eur/i.test(text)) currency = 'EUR';
+    else if (/gbp/i.test(text)) currency = 'GBP';
+  }
+
+  // Vendor: first substantial line that isn't a label
+  let vendor = '';
+  for (const line of lines.slice(0, 8)) {
+    if (line.length > 3 && line.length < 60 && !/invoice|receipt|date|total|amount|bill|page/i.test(line)) {
+      vendor = line;
+      break;
+    }
+  }
+
+  return { source, vendor, invoice, date, total, currency };
+}
+
+function addRow(data) {
+  rows.push(data);
+  render();
+}
+
+function render() {
+  results.style.display = 'block';
+  tbody.innerHTML = '';
+  rows.forEach((r, i) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${escape(r.source)}</td>
+      <td><input value="${escape(r.vendor)}" data-i="${i}" data-f="vendor"></td>
+      <td><input value="${escape(r.invoice)}" data-i="${i}" data-f="invoice"></td>
+      <td><input value="${escape(r.date)}" data-i="${i}" data-f="date"></td>
+      <td><input value="${escape(r.total)}" data-i="${i}" data-f="total"></td>
+      <td><input value="${escape(r.currency)}" data-i="${i}" data-f="currency"></td>
+    `;
+    tbody.appendChild(tr);
+  });
+  tbody.querySelectorAll('input').forEach(inp => {
+    inp.addEventListener('input', e => {
+      const i = +e.target.dataset.i;
+      const f = e.target.dataset.f;
+      rows[i][f] = e.target.value;
+    });
+  });
+}
+
+function escape(s) { return (s || '').replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
+
+function toCSV() {
+  const headers = ['Source','Vendor','Invoice','Date','Total','Currency'];
+  const lines = [headers.join(',')];
+  rows.forEach(r => {
+    lines.push([r.source, r.vendor, r.invoice, r.date, r.total, r.currency]
+      .map(v => `"${(v || '').replace(/"/g, '""')}"`).join(','));
+  });
+  return lines.join('\n');
+}
+
+downloadBtn.addEventListener('click', () => {
+  const csv = toCSV();
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'invoices.csv';
+  a.click();
+});
+
+copyBtn.addEventListener('click', () => {
+  navigator.clipboard.writeText(toCSV());
+  status.textContent = 'CSV copied to clipboard';
+});
+
+clearBtn.addEventListener('click', () => {
+  rows = [];
+  results.style.display = 'none';
+  tbody.innerHTML = '';
+  status.textContent = '';
+  pasteArea.value = '';
+});
+</script>
+</body>
+</html>
